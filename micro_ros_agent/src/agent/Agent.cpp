@@ -29,6 +29,41 @@
 #include <signal.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+
+#include <gattlib.h>
+#include <glib.h>
+#include <signal.h>
+
+typedef enum { READ, WRITE} operation_t;
+operation_t g_operation;
+
+static uuid_t g_uuid;
+static uuid_t g_notify_uuid;
+long int value_data = 0x31;
+char write_uuid[] = "0000fff2-0000-1000-8000-00805f9b34fb";
+char read_notification_uuid[] = "0000fff1-0000-1000-8000-00805f9b34fb";
+
+static GMainLoop *m_main_loop;
+
+static void usage(char *argv[]) {
+	printf("%s <device_address> <read|write> <uuid> [<hex-value-to-write>]\n", argv[0]);
+}
+
+static void on_user_abort(int arg) {
+	g_main_loop_quit(m_main_loop);
+}
+
+void notification_handler(const uuid_t* uuid, const uint8_t* data, size_t data_length, void* user_data) {
+	int i;
+
+	printf("Notification Handler: ");
+
+	for (i = 0; i < data_length; i++) {
+		printf("%02x ", data[i]);
+	}
+	printf("\n");
+}
+
 namespace uros {
 namespace agent {
 
@@ -41,6 +76,65 @@ bool Agent::create(
         int argc,
         char** argv)
 {
+    int ret;
+    gatt_connection_t* connection;
+
+    printf("Value to write: 0x%lx\n", value_data);
+
+    if (gattlib_string_to_uuid(write_uuid, strlen(write_uuid) + 1, &g_uuid) < 0) {
+        usage(argv);
+        return 1;
+    }
+
+    if (gattlib_string_to_uuid(read_notification_uuid, strlen(read_notification_uuid) + 1, &g_notify_uuid) < 0) {
+        usage(argv);
+        return 1;
+    }
+
+    connection = gattlib_connect(NULL, argv[1], GATTLIB_CONNECTION_OPTIONS_LEGACY_DEFAULT);
+    if (connection == NULL) {
+        printf( "Fail to connect to the bluetooth device.");
+        return 1;
+    }
+    
+    gattlib_register_notification(connection, notification_handler, NULL);
+
+    ret = gattlib_notification_start(connection, &g_notify_uuid);
+    if (ret) {
+        printf("Fail to start notification.");
+        goto EXIT;
+    }
+
+    ret = gattlib_write_char_by_uuid(connection, &g_uuid, &value_data, sizeof(value_data));
+    if (ret != GATTLIB_SUCCESS) {
+        char uuid_str[MAX_LEN_UUID_STR + 1];
+
+        gattlib_uuid_to_string(&g_uuid, uuid_str, sizeof(uuid_str));
+
+        if (ret == GATTLIB_NOT_FOUND) {
+            printf( "Could not find GATT Characteristic with UUID %s. "
+                "You might call the program with '--gatt-discovery'.", uuid_str);
+        } else {
+            printf( "Error while writing GATT Characteristic with UUID %s (ret:%d)",
+                uuid_str, ret);
+        }
+        goto EXIT;
+    }
+
+    // Catch CTRL-C
+	signal(SIGINT, on_user_abort);
+
+	m_main_loop = g_main_loop_new(NULL, 0);
+	g_main_loop_run(m_main_loop);
+
+	// In case we quit the main loop, clean the connection
+	gattlib_notification_stop(connection, &g_notify_uuid);
+	g_main_loop_unref(m_main_loop);
+
+    EXIT:
+        gattlib_disconnect(connection);
+        return ret;
+    
     bool result       = false;
     bool custom_agent = false;
 

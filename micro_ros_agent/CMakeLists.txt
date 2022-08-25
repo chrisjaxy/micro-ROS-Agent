@@ -50,6 +50,15 @@ find_package(ament_cmake_gtest REQUIRED)
 
 find_package(micro_ros_msgs REQUIRED)
 
+find_package(PkgConfig REQUIRED)
+
+pkg_search_module(GATTLIB REQUIRED gattlib)
+pkg_search_module(GLIB REQUIRED glib-2.0)
+pkg_search_module(PCRE REQUIRED libpcre)
+
+include_directories(${GLIB_INCLUDE_DIRS})
+list(APPEND gattlib_LIBS ${GLIB_LDFLAGS})
+
 add_executable(${PROJECT_NAME}
   src/main.cpp
   src/agent/Agent.cpp
@@ -79,6 +88,8 @@ target_link_libraries(${PROJECT_NAME}
   microxrcedds_agent
   fastcdr
   fastrtps
+  gattlib
+  glib-2.0
   $<$<BOOL:$<PLATFORM_ID:Linux>>:rt>
   $<$<BOOL:$<PLATFORM_ID:Linux>>:dl>
   )
