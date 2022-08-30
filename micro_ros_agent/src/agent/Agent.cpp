@@ -21,14 +21,6 @@
 #include <memory>
 
 #include <uxr/agent/transport/custom/CustomAgent.hpp>
-#include <uxr/agent/transport/endpoint/IPv4EndPoint.hpp>
-
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <signal.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 
 #include <gattlib.h>
 #include <glib.h>
@@ -39,24 +31,21 @@ operation_t g_operation;
 
 static uuid_t g_uuid;
 static uuid_t g_notify_uuid;
-long int value_data = 0x31;
-char write_uuid[] = "0000fff2-0000-1000-8000-00805f9b34fb";
-char read_notification_uuid[] = "0000fff1-0000-1000-8000-00805f9b34fb";
+
+char write_uuid[]        = "0000fff2-0000-1000-8000-00805f9b34fb";
+char notification_uuid[] = "0000fff1-0000-1000-8000-00805f9b34fb";
 
 static GMainLoop *m_main_loop;
 
-static void usage(char *argv[]) {
-	printf("%s <device_address> <read|write> <uuid> [<hex-value-to-write>]\n", argv[0]);
-}
-
 static void on_user_abort(int arg) {
+    (void) arg;
 	g_main_loop_quit(m_main_loop);
 }
 
 void notification_handler(const uuid_t* uuid, const uint8_t* data, size_t data_length, void* user_data) {
-	int i;
-
-	printf("Notification Handler: ");
+	(void)uuid;
+    (void)user_data;
+    size_t i;
 
 	for (i = 0; i < data_length; i++) {
 		printf("%02x ", data[i]);
@@ -75,81 +64,18 @@ Agent::Agent()
 bool Agent::create(
         int argc,
         char** argv)
-{
-    int ret;
-    gatt_connection_t* connection;
-
-    printf("Value to write: 0x%lx\n", value_data);
-
-    if (gattlib_string_to_uuid(write_uuid, strlen(write_uuid) + 1, &g_uuid) < 0) {
-        usage(argv);
-        return 1;
-    }
-
-    if (gattlib_string_to_uuid(read_notification_uuid, strlen(read_notification_uuid) + 1, &g_notify_uuid) < 0) {
-        usage(argv);
-        return 1;
-    }
-
-    connection = gattlib_connect(NULL, argv[1], GATTLIB_CONNECTION_OPTIONS_LEGACY_DEFAULT);
-    if (connection == NULL) {
-        printf( "Fail to connect to the bluetooth device.");
-        return 1;
-    }
-    
-    gattlib_register_notification(connection, notification_handler, NULL);
-
-    ret = gattlib_notification_start(connection, &g_notify_uuid);
-    if (ret) {
-        printf("Fail to start notification.");
-        goto EXIT;
-    }
-
-    ret = gattlib_write_char_by_uuid(connection, &g_uuid, &value_data, sizeof(value_data));
-    if (ret != GATTLIB_SUCCESS) {
-        char uuid_str[MAX_LEN_UUID_STR + 1];
-
-        gattlib_uuid_to_string(&g_uuid, uuid_str, sizeof(uuid_str));
-
-        if (ret == GATTLIB_NOT_FOUND) {
-            printf( "Could not find GATT Characteristic with UUID %s. "
-                "You might call the program with '--gatt-discovery'.", uuid_str);
-        } else {
-            printf( "Error while writing GATT Characteristic with UUID %s (ret:%d)",
-                uuid_str, ret);
-        }
-        goto EXIT;
-    }
-
-    // Catch CTRL-C
-	signal(SIGINT, on_user_abort);
-
-	m_main_loop = g_main_loop_new(NULL, 0);
-	g_main_loop_run(m_main_loop);
-
-	// In case we quit the main loop, clean the connection
-	gattlib_notification_stop(connection, &g_notify_uuid);
-	g_main_loop_unref(m_main_loop);
-
-    EXIT:
-        gattlib_disconnect(connection);
-        return ret;
-    
+{    
     bool result       = false;
     bool custom_agent = false;
 
-    if (!strcmp("custom", argv[1]) && argc > 3)
-    {
+    if (!strcmp("ble", argv[1]) && argc > 2) {
         result       = true;
         custom_agent = true;
-    }
-    else
-    {
+    } else {
         result = xrce_dds_agent_instance_.create(argc, argv);
     }
 
-    if (result)
-    {
+    if (result) {
         /**
          * Add CREATE_PARTICIPANT callback.
          */
@@ -429,45 +355,38 @@ bool Agent::create(
             std::move(on_delete_replier));
     }
 
-    if (custom_agent)
-    {       
+    if (custom_agent) {       
         eprosima::uxr::Middleware::Kind mw_kind(eprosima::uxr::Middleware::Kind::FASTDDS);
-        uint16_t agent_port(std::stoi(argv[3]));
-        struct pollfd poll_fd;
+        gatt_connection_t* connection;
 
+        if (gattlib_string_to_uuid(write_uuid, strlen(write_uuid) + 1, &g_uuid) < 0) {
+            printf("write_uuid %s error \n", write_uuid);
+            return 1;
+        }
+
+        if (gattlib_string_to_uuid(notification_uuid, strlen(notification_uuid) + 1, &g_notify_uuid) < 0) {
+            printf("notification_uuid %s error \n", notification_uuid);
+            return 1;
+        }
         /**
          * @brief Agent's initialization behaviour description.
          */
         eprosima::uxr::CustomAgent::InitFunction init_function = [&]() -> bool
         {
-            bool rv = false;
-            poll_fd.fd = socket(PF_INET, SOCK_DGRAM, 0);
-
-            if (-1 != poll_fd.fd)
-            {
-                struct sockaddr_in address{};
-
-                address.sin_family = AF_INET;
-                address.sin_port = htons(agent_port);
-                address.sin_addr.s_addr = INADDR_ANY;
-                memset(address.sin_zero, '\0', sizeof(address.sin_zero));
-
-                if (-1 != bind(poll_fd.fd,
-                            reinterpret_cast<struct sockaddr*>(&address),
-                            sizeof(address)))
-                {
-                    poll_fd.events = POLLIN;
-                    rv = true;
-
-                    UXR_AGENT_LOG_INFO(
-                        UXR_DECORATE_GREEN(
-                            "This is an example of a custom Micro XRCE-DDS Agent INIT function"),
-                        "port: {}",
-                        agent_port);
-                }
+            connection = gattlib_connect(NULL, argv[2], GATTLIB_CONNECTION_OPTIONS_LEGACY_DEFAULT);
+            if (connection == NULL) {
+                printf("Fail to connect to the bluetooth device %s \n", argv[2]);
+                return false;
             }
 
-            return rv;
+            gattlib_register_notification(connection, notification_handler, NULL);
+
+            if (gattlib_notification_start(connection, &g_notify_uuid)) {
+                printf("Fail to start notification.");
+                return false;
+            }
+
+            return true;
         };
 
         /**
@@ -475,27 +394,12 @@ bool Agent::create(
          */
         eprosima::uxr::CustomAgent::FiniFunction fini_function = [&]() -> bool
         {
-            if (-1 == poll_fd.fd)
-            {
-                return true;
+            if (connection != NULL) {
+                gattlib_notification_stop(connection, &g_notify_uuid);
+                gattlib_disconnect(connection);
             }
 
-            if (0 == ::close(poll_fd.fd))
-            {
-                poll_fd.fd = -1;
-
-                UXR_AGENT_LOG_INFO(
-                    UXR_DECORATE_GREEN(
-                        "This is an example of a custom Micro XRCE-DDS Agent FINI function"),
-                    "port: {}",
-                    agent_port);
-
-                return true;
-            }
-            else
-            {
-                return false;
-            }
+            return true;
         };
 
         /**
@@ -508,49 +412,12 @@ bool Agent::create(
                 int timeout,
                 eprosima::uxr::TransportRc& transport_rc) -> ssize_t
         {
-            struct sockaddr_in client_addr{};
-            socklen_t client_addr_len = sizeof(struct sockaddr_in);
-            ssize_t bytes_received = -1;
-
-            int poll_rv = poll(&poll_fd, 1, timeout);
-
-            if (0 < poll_rv)
-            {
-                bytes_received = recvfrom(
-                    poll_fd.fd,
-                    buffer,
-                    buffer_length,
-                    0,
-                    reinterpret_cast<struct sockaddr *>(&client_addr),
-                    &client_addr_len);
-
-                transport_rc = (-1 != bytes_received)
-                    ? eprosima::uxr::TransportRc::ok
-                    : eprosima::uxr::TransportRc::server_error;
-            }
-            else
-            {
-                transport_rc = (0 == poll_rv)
-                    ? eprosima::uxr::TransportRc::timeout_error
-                    : eprosima::uxr::TransportRc::server_error;
-                bytes_received = 0;
-            }
-
-            if (eprosima::uxr::TransportRc::ok == transport_rc)
-            {
-                UXR_AGENT_LOG_INFO(
-                    UXR_DECORATE_GREEN(
-                        "This is an example of a custom Micro XRCE-DDS Agent RECV_MSG function"),
-                    "port: {}",
-                    agent_port);
-                source_endpoint->set_member_value<uint32_t>("address",
-                    static_cast<uint32_t>(client_addr.sin_addr.s_addr));
-                source_endpoint->set_member_value<uint16_t>("port",
-                    static_cast<uint16_t>(client_addr.sin_port));
-            }
-
-
-            return bytes_received;
+            (void)source_endpoint;
+            (void)buffer;
+            (void)buffer_length;
+            (void)timeout;
+            transport_rc = eprosima::uxr::TransportRc::timeout_error;
+            return 0;
         };
 
         /**
@@ -562,36 +429,12 @@ bool Agent::create(
             size_t message_length,
             eprosima::uxr::TransportRc& transport_rc) -> ssize_t
         {
-            struct sockaddr_in client_addr{};
-
-            memset(&client_addr, 0, sizeof(client_addr));
-            client_addr.sin_family = AF_INET;
-            client_addr.sin_port = destination_endpoint->get_member<uint16_t>("port");
-            client_addr.sin_addr.s_addr = destination_endpoint->get_member<uint32_t>("address");
-
-            ssize_t bytes_sent =
-                sendto(
-                    poll_fd.fd,
-                    buffer,
-                    message_length,
-                    0,
-                    reinterpret_cast<struct sockaddr*>(&client_addr),
-                    sizeof(client_addr));
-
-            transport_rc = (-1 != bytes_sent)
-                ? eprosima::uxr::TransportRc::ok
-                : eprosima::uxr::TransportRc::server_error;
-
-            if (eprosima::uxr::TransportRc::ok == transport_rc)
-            {
-                UXR_AGENT_LOG_INFO(
-                    UXR_DECORATE_GREEN(
-                        "This is an example of a custom Micro XRCE-DDS Agent SEND_MSG function"),
-                    "port: {}",
-                    agent_port);
+            (void)destination_endpoint;
+            if (gattlib_write_char_by_uuid(connection, &g_uuid, buffer, message_length) != 0) {
+                printf("Error while writing \n");
             }
-
-            return bytes_sent;
+            transport_rc = eprosima::uxr::TransportRc::ok;
+            return message_length;
         };
 
         /**
@@ -603,14 +446,12 @@ bool Agent::create(
              * EndPoint definition for this transport. We define an address and a port.
              */
             eprosima::uxr::CustomEndPoint custom_endpoint;
-            custom_endpoint.add_member<uint32_t>("address");
-            custom_endpoint.add_member<uint16_t>("port");
 
             /**
              * Create a custom agent instance.
              */
             eprosima::uxr::CustomAgent custom_agent(
-                "UDPv4_CUSTOM",
+                "BLE_CUSTOM",
                 &custom_endpoint,
                 mw_kind,
                 false,
@@ -625,18 +466,16 @@ bool Agent::create(
             custom_agent.set_verbose_level(6);
 
             /**
-             * Run agent and wait until receiving an stop signal.
+             * Run agent
              */
             custom_agent.start();
+            
+            signal(SIGINT, on_user_abort);
 
-            int n_signal = 0;
-            sigset_t signals;
-            sigwait(&signals, &n_signal);
+            m_main_loop = g_main_loop_new(NULL, 0);
+            g_main_loop_run(m_main_loop);
+	        g_main_loop_unref(m_main_loop);
 
-            /**
-             * Stop agent, and exit.
-             */
-            custom_agent.stop();
             return 0;
         }
         catch (const std::exception& e)
@@ -661,7 +500,7 @@ auto it = graph_manager_map_.find(domain_id);
 
     if (it != graph_manager_map_.end()) {
         return it->second;
-    }else{
+    } else {
         return graph_manager_map_.insert(
             std::make_pair(
                 domain_id,
