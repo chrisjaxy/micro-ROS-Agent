@@ -25,6 +25,7 @@
 #include <gattlib.h>
 #include <glib.h>
 #include <signal.h>
+#include <mqueue.h>
 
 typedef enum { READ, WRITE} operation_t;
 operation_t g_operation;
@@ -37,6 +38,8 @@ char notification_uuid[] = "0000fff1-0000-1000-8000-00805f9b34fb";
 
 static GMainLoop *m_main_loop;
 
+mqd_t receive_mq;
+
 static void on_user_abort(int arg) {
     (void) arg;
 	g_main_loop_quit(m_main_loop);
@@ -45,12 +48,8 @@ static void on_user_abort(int arg) {
 void notification_handler(const uuid_t* uuid, const uint8_t* data, size_t data_length, void* user_data) {
 	(void)uuid;
     (void)user_data;
-    size_t i;
 
-	for (i = 0; i < data_length; i++) {
-		printf("%02x ", data[i]);
-	}
-	printf("\n");
+    mq_send(receive_mq, (char *)data, data_length, 0);
 }
 
 namespace uros {
@@ -368,6 +367,19 @@ bool Agent::create(
             printf("notification_uuid %s error \n", notification_uuid);
             return 1;
         }
+
+        struct mq_attr attr;
+        attr.mq_flags   = O_NONBLOCK;
+        attr.mq_msgsize = 1024;
+        attr.mq_maxmsg  = 10;
+        
+        receive_mq = mq_open("/ble", O_RDWR | O_CREAT, 0666, NULL);
+        if (receive_mq == -1) {
+            printf("mq_open errno %d\n", errno);
+            return 1;
+        }
+        mq_setattr(receive_mq, &attr, NULL);  // 设置为非阻塞
+
         /**
          * @brief Agent's initialization behaviour description.
          */
@@ -416,8 +428,16 @@ bool Agent::create(
             (void)buffer;
             (void)buffer_length;
             (void)timeout;
-            transport_rc = eprosima::uxr::TransportRc::timeout_error;
-            return 0;
+
+            int bytes_received = mq_receive(receive_mq, (char *)buffer, buffer_length, NULL);
+
+            if (bytes_received > 0) {
+                transport_rc = eprosima::uxr::TransportRc::ok;
+                return (size_t) bytes_received;
+            } else {
+                transport_rc = eprosima::uxr::TransportRc::timeout_error;
+                return 0;
+            }
         };
 
         /**
@@ -475,6 +495,8 @@ bool Agent::create(
             m_main_loop = g_main_loop_new(NULL, 0);
             g_main_loop_run(m_main_loop);
 	        g_main_loop_unref(m_main_loop);
+
+            mq_close(receive_mq);
 
             return 0;
         }
